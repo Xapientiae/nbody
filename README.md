@@ -1,2 +1,3 @@
 # nbody
-A simple python/numba app for simulating n-body problem, with some control over starting state
+A simple python/numba app for simulating n-body problem, with some control over starting state. Currently the program is mostly vibe-coded, but will eventually be refined to make sure it's optimized, and most importantly, fully understood by me. The comments may be a mix of Polish and English as I'm multilingual and sometimes use them interchange'ably. The project itself is an assigment for a uni course I'm taking. The idea is obviously not that original, but I am midway through "Three Body Problem" book which simply was my inspiration. You may report bugs, but I am afraid that after the semester ends, I may only very occasionaly look at the project when I'm bored.
+Feel free to fork, as the licence is the only respectable one :)
