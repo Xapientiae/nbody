@@ -78,12 +78,13 @@ def mass_to_temperature_jit(m_arr):
 # -----------------------
 
 @njit(parallel=True, fastmath=True)
-def compute_accelerations(positions, masses, radii, G, out, eps=0.0, block=64, softening=0.0):
+def compute_accelerations(positions, masses, radii, G, out, eps=0.0, block=2, softening=0.0):
     N, d = positions.shape
     T = nb.get_num_threads()
     local = np.zeros((T, N, d))
 
-    nblocks = (N + block - 1) // block
+    nblocks = max(1, (N + block - 1) // block)
+
     for bbi in prange(0, nblocks):
         tid = nb.get_thread_id()
         bi = bbi * block
@@ -152,6 +153,26 @@ def verlet_step(pos, vel, acc, dt, masses, radii, G, tmp_pos, tmp_acc, softening
             tmp_pos[i, k] = pos[i, k] + vel[i, k] * dt + 0.5 * acc[i, k] * (dt * dt)
 
     compute_accelerations(tmp_pos, masses, radii, G, tmp_acc, 1e-30, 64, softening)
+
+    for i in range(N):
+        for k in range(d):
+            vel[i, k] += 0.5 * (acc[i, k] + tmp_acc[i, k]) * dt
+            pos[i, k] = tmp_pos[i, k]
+            acc[i, k] = tmp_acc[i, k]
+
+
+@njit(fastmath=True)
+def verlet_step_block(pos, vel, acc, dt, masses, radii, G, tmp_pos, tmp_acc, softening=0.0, block=64):
+    """Verlet integrator variant that accepts a `block` parameter forwarded to compute_accelerations.
+
+    This mirrors `verlet_step` but allows benchmarking different `block` sizes.
+    """
+    N, d = pos.shape
+    for i in range(N):
+        for k in range(d):
+            tmp_pos[i, k] = pos[i, k] + vel[i, k] * dt + 0.5 * acc[i, k] * (dt * dt)
+
+    compute_accelerations(tmp_pos, masses, radii, G, tmp_acc, 1e-30, block, softening)
 
     for i in range(N):
         for k in range(d):
