@@ -3,6 +3,10 @@ import math
 from numba import njit, prange
 import numba as nb
 import os
+import matplotlib
+
+# Histogram plots are written to disk only; use a non-GUI backend to avoid Tk warnings.
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # Stałe fizyczne

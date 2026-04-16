@@ -2,9 +2,6 @@ import time
 import math
 import argparse
 import numpy as np
-import time
-import argparse
-import numpy as np
 import numba as nb
 import sys
 
