@@ -251,7 +251,7 @@ def random_masses(N, min_mass=0.08, max_mass=100):
     return masses
 
 
-def create_rotating_disk(N, masses, r_min=1e10/AU, r_max=5e11/AU, G=1, v_scale=0.95, inward_fraction=0.02, clockwise=True, seed=None):
+def create_rotating_disk(N, masses, r_min=1e10/AU, r_max=5e11/AU, G=1, v_scale=0.95, inward_fraction=0.02, clockwise=True, seed=None, center_max_mass=False, zero_total_momentum=False):
     rng = np.random.default_rng(seed)
     u = rng.random(N)
     r = np.sqrt(u * (r_max**2 - r_min**2) + r_min**2)
@@ -284,4 +284,15 @@ def create_rotating_disk(N, masses, r_min=1e10/AU, r_max=5e11/AU, G=1, v_scale=0
     vr_in = -(inward_fraction * v_circ).reshape(-1, 1) * np.column_stack((r_x, r_y))
 
     velocities = (vt + vr_in).astype(float)
+    if center_max_mass or zero_total_momentum:
+        max_mass_idx = int(np.argmax(masses))
+        if center_max_mass:
+            positions[max_mass_idx] = np.array([0.0, 0.0], dtype=float)
+        if zero_total_momentum:
+            velocities[max_mass_idx] = np.array([0.0, 0.0], dtype=float)
+            total_momentum = np.sum(masses[:, None] * velocities, axis=0)
+            other_mass = float(np.sum(masses) - masses[max_mass_idx])
+            if other_mass > 0.0:
+                velocities -= total_momentum / other_mass
+                velocities[max_mass_idx] = np.array([0.0, 0.0], dtype=float)
     return positions, velocities

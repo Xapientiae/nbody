@@ -49,7 +49,7 @@ class NBodySimulation:
     and the Vispy main thread will render whatever is available when it draws.
     """
 
-    def __init__(self, positions, velocities, masses, radii, G, dt, physics_steps_per_frame=1, marker_base=8.0, marker_scale_exponent=1.0, marker_max_size=80.0, marker_world_scaling=False, marker_world_scale=1.0, enable_collisions=True, density=5500.0, softening=0.1, collision_merge_margin=1.0, use_mass_radius=False, max_sim_steps_per_second=None, render_fps=60, leave_one_core=True, numba_threads=None, stats_log_interval=None, show_canvas=True, adaptive_steps_per_frame=False, min_physics_steps_per_frame=1, max_physics_steps_per_frame=64):
+    def __init__(self, positions, velocities, masses, radii, G, dt, physics_steps_per_frame=None, marker_base=8.0, marker_scale_exponent=1.0, marker_max_size=80.0, marker_world_scaling=False, marker_world_scale=1.0, enable_collisions=True, density=5500.0, softening=0.1, collision_merge_margin=1.0, use_mass_radius=False, max_sim_steps_per_second=None, render_fps=60, leave_one_core=True, numba_threads=None, stats_log_interval=None, show_canvas=True, adaptive_steps_per_frame=False, min_physics_steps_per_frame=1, max_physics_steps_per_frame=64):
         self.window_backend = _ensure_window_backend()
 
         # core state (owned and mutated by simulation thread)
@@ -82,11 +82,14 @@ class NBodySimulation:
         self.marker_world_scale = float(marker_world_scale)
 
         # simulation control
-        self.physics_steps_per_frame = int(max(1, physics_steps_per_frame))
         self.max_sim_steps_per_second = float(max_sim_steps_per_second) if (max_sim_steps_per_second is not None and max_sim_steps_per_second > 0) else None
         self.adaptive_steps_per_frame = bool(adaptive_steps_per_frame)
         self.min_physics_steps_per_frame = int(max(1, min_physics_steps_per_frame))
         self.max_physics_steps_per_frame = int(max(self.min_physics_steps_per_frame, max_physics_steps_per_frame))
+        if physics_steps_per_frame is None:
+            self.physics_steps_per_frame = int(self.min_physics_steps_per_frame)
+        else:
+            self.physics_steps_per_frame = int(max(1, physics_steps_per_frame))
         self.physics_steps_per_frame = int(min(max(self.physics_steps_per_frame, self.min_physics_steps_per_frame), self.max_physics_steps_per_frame))
         self._adapt_every_batches = 20
         self._next_adapt_batch = self._adapt_every_batches
@@ -429,80 +432,141 @@ class NBodySimulation:
     def resolve_collisions(self):
         if self.pos.shape[0] <= 1:
             return
+
+        N = self.pos.shape[0]
+        diffs = self.pos[:, None, :] - self.pos[None, :, :]
+        d2 = np.sum(diffs * diffs, axis=2)
+        radii_sum = (self.radius[:, None] + self.radius[None, :])
+        radii_thr2 = (radii_sum * self.collision_merge_margin) ** 2
+        coll = np.triu(d2 <= radii_thr2, k=1)
+        pairs = np.argwhere(coll)
+        if pairs.shape[0] == 0:
+            return
+
+        # Batch merge overlapping groups, then recompute accelerations once.
+        parent = np.arange(N, dtype=np.int64)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra = find(a)
+            rb = find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for k in range(pairs.shape[0]):
+            i = int(pairs[k, 0])
+            j = int(pairs[k, 1])
+            union(i, j)
+
+        roots = np.empty(N, dtype=np.int64)
+        for i in range(N):
+            roots[i] = find(i)
+
+        unique_roots, inverse = np.unique(roots, return_inverse=True)
+        newN = unique_roots.size
+        counts = np.bincount(inverse, minlength=newN)
+        if np.all(counts == 1):
+            return
+
+        d = self.pos.shape[1]
+        new_mass = np.zeros(newN, dtype=self.mass.dtype)
+        new_pos = np.zeros((newN, d), dtype=self.pos.dtype)
+        new_vel = np.zeros((newN, d), dtype=self.vel.dtype)
+        max_radius = np.zeros(newN, dtype=self.radius.dtype)
+        first_idx = np.full(newN, -1, dtype=np.int64)
+        vol_sum = None
+        if (not getattr(self, 'use_mass_radius', False)) and self.density <= 0.0:
+            vol_sum = np.zeros(newN, dtype=np.float64)
+
+        colors = getattr(self, 'colors', None)
+        if colors is not None and colors.shape[0] != N:
+            colors = None
+
+        for i in range(N):
+            idx = int(inverse[i])
+            m = float(self.mass[i])
+            new_mass[idx] += m
+            new_pos[idx] += self.pos[i] * m
+            new_vel[idx] += self.vel[i] * m
+            r = float(self.radius[i])
+            if r > max_radius[idx]:
+                max_radius[idx] = r
+            if first_idx[idx] < 0:
+                first_idx[idx] = i
+            if vol_sum is not None:
+                vol_sum[idx] += (4.0 / 3.0) * math.pi * (r ** 3)
+
+        for idx in range(newN):
+            if new_mass[idx] > 0.0:
+                new_pos[idx] /= new_mass[idx]
+                new_vel[idx] /= new_mass[idx]
+
+        new_radius = np.empty(newN, dtype=self.radius.dtype)
+        new_colors = np.empty((newN, 4), dtype=np.float32)
         merged_any = False
-        while True:
-            N = self.pos.shape[0]
-            if N <= 1:
-                break
-            diffs = self.pos[:, None, :] - self.pos[None, :, :]
-            d2 = np.sum(diffs * diffs, axis=2)
-            radii_sum = (self.radius[:, None] + self.radius[None, :])
-            radii_thr2 = (radii_sum * self.collision_merge_margin) ** 2
-            coll = np.triu(d2 <= radii_thr2, k=1)
-            pairs = np.argwhere(coll)
-            if pairs.shape[0] == 0:
-                break
-            i, j = pairs[0]
-            mi = float(self.mass[i])
-            mj = float(self.mass[j])
-            new_mass = mi + mj
-            new_pos = (mi * self.pos[i] + mj * self.pos[j]) / new_mass
-            new_vel = (mi * self.vel[i] + mj * self.vel[j]) / new_mass
-
-            if getattr(self, 'use_mass_radius', False):
-                try:
-                    new_radius = mass_to_radius(new_mass)
-                except Exception:
-                    new_radius = (new_mass / (4.0 / 3.0 * math.pi * max(self.density, 1.0))) ** (1.0 / 3.0)
-            else:
-                if self.density > 0.0:
-                    new_radius = (new_mass / (4.0 / 3.0 * math.pi * self.density)) ** (1.0 / 3.0)
+        for idx in range(newN):
+            if counts[idx] == 1:
+                src = int(first_idx[idx])
+                new_radius[idx] = self.radius[src]
+                if colors is not None:
+                    new_colors[idx] = colors[src]
                 else:
-                    vol_i = (4.0 / 3.0) * math.pi * (self.radius[i] ** 3)
-                    vol_j = (4.0 / 3.0) * math.pi * (self.radius[j] ** 3)
-                    new_vol = vol_i + vol_j
-                    new_radius = (new_vol * 3.0 / (4.0 * math.pi)) ** (1.0 / 3.0)
-
-            try:
-                old_ri = float(self.radius[i])
-                old_rj = float(self.radius[j])
-                if new_radius < max(old_ri, old_rj):
-                    new_radius = max(old_ri, old_rj)
-            except Exception:
-                pass
-
-            self.pos[i] = new_pos
-            self.vel[i] = new_vel
-            self.mass[i] = new_mass
-            self.radius[i] = new_radius
-            try:
-                self.colors[i] = temperature_to_rgba(mass_to_temperature(new_mass))[0].astype(np.float32)
-            except Exception:
-                self.colors[i] = np.ones(4, dtype=np.float32)
-
-            self.pos = np.delete(self.pos, j, axis=0)
-            self.vel = np.delete(self.vel, j, axis=0)
-            self.mass = np.delete(self.mass, j, axis=0)
-            self.radius = np.delete(self.radius, j, axis=0)
-            self.colors = np.delete(self.colors, j, axis=0)
-
-            self.acc = np.zeros_like(self.pos)
-            self._tmp_pos = np.empty_like(self.pos)
-            self._tmp_acc = np.empty_like(self.pos)
-
-            compute_accelerations(self.pos, self.mass, self.radius, self.G, self.acc)
-
-            self.compute_sizes()
+                    try:
+                        new_colors[idx] = temperature_to_rgba(mass_to_temperature(self.mass[src]))[0].astype(np.float32)
+                    except Exception:
+                        new_colors[idx] = np.ones(4, dtype=np.float32)
+                continue
 
             merged_any = True
-
-        if merged_any:
-            # Rendering runs on the main thread; simulation thread publishes snapshots only.
-            if threading.current_thread() is threading.main_thread():
+            if getattr(self, 'use_mass_radius', False):
                 try:
-                    self.scatter.set_data(self.pos, size=self.sizes, face_color=self.colors)
+                    new_r = mass_to_radius(new_mass[idx])
                 except Exception:
-                    pass
+                    new_r = (new_mass[idx] / (4.0 / 3.0 * math.pi * max(self.density, 1.0))) ** (1.0 / 3.0)
+            else:
+                if self.density > 0.0:
+                    new_r = (new_mass[idx] / (4.0 / 3.0 * math.pi * self.density)) ** (1.0 / 3.0)
+                else:
+                    new_vol = float(vol_sum[idx]) if vol_sum is not None else 0.0
+                    new_r = (new_vol * 3.0 / (4.0 * math.pi)) ** (1.0 / 3.0)
+
+            if new_r < max_radius[idx]:
+                new_r = max_radius[idx]
+            new_radius[idx] = new_r
+
+            try:
+                new_colors[idx] = temperature_to_rgba(mass_to_temperature(new_mass[idx]))[0].astype(np.float32)
+            except Exception:
+                new_colors[idx] = np.ones(4, dtype=np.float32)
+
+        if not merged_any:
+            return
+
+        self.pos = new_pos
+        self.vel = new_vel
+        self.mass = new_mass
+        self.radius = new_radius
+        self.colors = new_colors
+
+        self.acc = np.zeros_like(self.pos)
+        self._tmp_pos = np.empty_like(self.pos)
+        self._tmp_acc = np.empty_like(self.pos)
+
+        compute_accelerations(self.pos, self.mass, self.radius, self.G, self.acc, 1e-30, 64, self.softening)
+
+        self.compute_sizes()
+
+        # Rendering runs on the main thread; simulation thread publishes snapshots only.
+        if threading.current_thread() is threading.main_thread():
+            try:
+                self.scatter.set_data(self.pos, size=self.sizes, face_color=self.colors)
+            except Exception:
+                pass
 
     def _on_close(self, event=None):
         try:

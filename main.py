@@ -9,27 +9,38 @@ import numpy as np
 
 
 def main():
-    N = 80
-    timestep = 0.1  # hours
-    collision_merge_factor = 5.0
+    N = 500
+    timestep = 1  # hours
+    collision_merge_factor = 3.0
     # Display-only radius multiplier (does not affect physics or collision logic).
-    display_radius_multiplier = 5.0
+    display_radius_multiplier = 3.0
     # Keep small physics batches so render updates stay responsive.
-    steps_per_frame = 2
+    steps_per_frame = 10
 
     masses = random_masses(N)
-    positions, velocities = create_rotating_disk(N, masses, r_min=1e10/AU, r_max=5e11/AU, v_scale=0.8, inward_fraction=0.02, clockwise=True, seed=(np.random.randint(0, 1e6)))
+    positions, velocities = create_rotating_disk(
+        N,
+        masses,
+        r_min=1e10 / AU,
+        r_max=5e11 / AU,
+        v_scale=1.0,
+        inward_fraction=0.0,
+        clockwise=True,
+        seed=(np.random.randint(0, 1e6)),
+        center_max_mass=True,
+        zero_total_momentum=True,
+    )
     radii = mass_to_radius(masses)
 
     sim = NBodySimulation(
         positions=positions,
-        velocities=velocities*0.01,
+        velocities=velocities,
         masses=masses,
         radii=radii,
         dt=timestep * 3600.0 / TUNIT,
-        physics_steps_per_frame=steps_per_frame,
-        render_fps=120,
-        max_sim_steps_per_second=240,
+        #physics_steps_per_frame=steps_per_frame,
+        render_fps=240,
+        max_sim_steps_per_second=1000,
         leave_one_core=True,
         stats_log_interval=1.0,
         collision_merge_margin=collision_merge_factor,
@@ -40,7 +51,7 @@ def main():
         marker_world_scale=display_radius_multiplier,
         adaptive_steps_per_frame=True,
         min_physics_steps_per_frame=1,
-        max_physics_steps_per_frame=24,
+        max_physics_steps_per_frame=100,
         G=1,
     )
 
